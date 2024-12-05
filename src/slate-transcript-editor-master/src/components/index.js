@@ -58,7 +58,7 @@ import { getTaskId } from '../../../user/User';
 import useRecorder from './useRecorder';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
-import { OFFLINE } from '../../../constants';
+import { OFFLINE, ERROR_IF_NOT_EDITED } from '../../../constants';
 import localforage from 'localforage';
 
 const PLAYBACK_RATE_VALUES = [0.2, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 3, 3.5];
@@ -105,6 +105,8 @@ function SlateTranscriptEditor(props) {
   let [activePIndex, setActivePIndex] = useState(null);
   let [beforeText, setBeforeText] = useState('');
   let [finishedPIndices, setFinishedPIndices] = useState([]);
+  const [playing, setPlaying] = useState(false);
+  const [audio1, setAudio1] = useState(null);
   // END variables for commandclips
 
   useEffect(() => {
@@ -115,13 +117,28 @@ function SlateTranscriptEditor(props) {
     }
   }, [isProcessing]);
 
-  useEffect(() => {
-    if (props.transcriptData) {
-      const res = convertDpeToSlate(props.transcriptData);
-      setValue(res);
-      if (classificationMap !== undefined) {
-        fillClassificationMap(res);
+  useEffect(async () => {
+    let res = null;
+    let finishedPIndicesCached = null;
+
+    const title_check = await localforage.getItem('title_check');
+    if (title_check === props.title) {
+      res = await localforage.getItem('text');
+      finishedPIndicesCached = await localforage.getItem('finished');
+
+      if (res !== null && finishedPIndicesCached !== null) {
+        setValue(res);
+        setFinishedPIndices(finishedPIndicesCached);
       }
+    }
+
+    if ((res === null || finishedPIndicesCached === null) && props.transcriptData) {
+      res = convertDpeToSlate(props.transcriptData);
+      setValue(res);
+    }
+
+    if (res !== null && classificationMap !== undefined) {
+      fillClassificationMap(res);
     }
   }, []);
 
@@ -203,6 +220,31 @@ function SlateTranscriptEditor(props) {
   //     }
   //   }
   // }, [mediaRef]);
+
+  useEffect(() => {
+    if (["commandclips", "commandclips2"].includes(editMode)) {
+      localforage.iterate((value, key, iterationNumber) => {
+        const regexMatch = key.match(/^(\d+)commandclip$/);
+        if (regexMatch && regexMatch.length > 1) {
+          finishedPIndices.push(parseInt(regexMatch[1]));
+        }
+      }).then(() => {
+        setFinishedPIndices(finishedPIndices.concat([]));
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (editMode === 'commandclipsCheck' && value.length > 0) {
+     localforage.setItem('text', value);
+    }
+  }, [value]);
+
+  useEffect(() => {
+    if (editMode === 'commandclipsCheck' && finishedPIndices.length > 0) {
+      localforage.setItem('finished', finishedPIndices);
+    }
+  }, [finishedPIndices]);
 
   const handleModeChange = async (mode) => {
     console.log("mode changed to " + mode);
@@ -344,7 +386,7 @@ function SlateTranscriptEditor(props) {
       default:
         return <DefaultElement {...props} />;
     }
-  }, [editMode, audioURL, activePIndex]);
+  }, [editMode, audioURL, activePIndex, playing, audio1, finishedPIndices]);
 
   const handleClassificationRadioButtonChange = (event) => {
     const key = event.target.name.split('_')[1];
@@ -555,13 +597,16 @@ function SlateTranscriptEditor(props) {
     const handleRec = () => {
       if (isRecordingTTE) {
         // grab text
-        const bt = props.element.children[0].text;
-        setBeforeText(bt);
+        if (beforeText === '') {
+          const bt = props.element.children[0].text;
+          setBeforeText(bt);
+        }
 
         setIsRecordingTTE(false);
         // stopRecording must be last bc it triggers a rerender
         stopRecording();
       } else {
+        mediaRef.current.pause();
         setIsRecordingTTE(true);
         startRecording();
         setActivePIndex(index);
@@ -569,105 +614,138 @@ function SlateTranscriptEditor(props) {
       }
     }
     const playCommandClip = () => {
-      const a = new Audio(audioURL);
-      a.play();
+      if (!playing) {
+        setPlaying(true);
+        mediaRef.current.pause();
+        const a = new Audio(audioURL);
+        a.addEventListener('ended', () => setPlaying(false));
+        a.play();
+        setAudio1(a);
+      } else if (audio1 !== null) {
+        audio1.pause();
+        audio1.currentTime = 0;
+        setPlaying(false);
+      }
     }
 
     const playCommandClipCheckMode = async () => {
-      const audio = await localforage.getItem(parseInt(index) + 'commandclip');
-      if (audio !== null) {
-        const bt = props.element.children[0].text;
-        setBeforeText(bt);
-        setActivePIndex(index);
+      if (!playing) {
+        setPlaying(true);
+        const audio = await localforage.getItem(parseInt(index) + 'commandclip');
+        if (audio !== null) {
+          if (beforeText === '') {
+            const bt = props.element.children[0].text;
+            setBeforeText(bt);
+          }
+          setActivePIndex(index);
 
-        const audioUrlFromBlob = await URL.createObjectURL(audio);
-        setAudioUrl(audioUrlFromBlob);
-        const a = new Audio(audioUrlFromBlob);
-        a.play();
+          const audioUrlFromBlob = URL.createObjectURL(audio);
+          setAudioUrl(audioUrlFromBlob);
+          const a = new Audio(audioUrlFromBlob);
+          a.addEventListener('ended', () => setPlaying(false));
+          a.play();
+          setAudio1(a);
+        } else {
+          setPlaying(false);
+          alert("no audio available, choose another audio file");
+        }
+      } else if (audio1 !== null) {
+        audio1.pause();
+        audio1.currentTime = 0;
+        setPlaying(false);
       } else {
-        alert("no audio available, choose another audio file");
+        setPlaying(false);
       }
     }
 
     const handleDone = async() => {
+      if (audio1 !== null) {
+        audio1.pause();
+        audio1.currentTime = 0;
+        setPlaying(false);
+      }
+
+      if (finishedPIndices.includes(index)) {
+        setFinishedPIndices(finishedPIndices.filter(pIndex => pIndex !== index));
+        setActivePIndex(index);
+        setBeforeText(null);
+
+        const audio = await localforage.getItem(parseInt(index) + 'commandclip');
+        if (audio !== null) {
+          const audioUrlFromBlob = URL.createObjectURL(audio);
+          setAudioUrl(audioUrlFromBlob);
+        } else {
+          setAudioUrl(true);
+        }
+
+        return;
+      }
+
       if (editable) {
-        //setEditable(false);
-        // TODO grab text
         const at = props.element.children[0].text;
-        if (at === beforeText) {
+        if (ERROR_IF_NOT_EDITED && at === beforeText) {
           alert("you need to edit something!");
           return;
         }
-        // TODO grab audio with:
-        let blob = await fetch(audioURL).then(r => r.blob({type: "audio/wav"}));
-        // TODO send to backend
-        // if (OFFLINE) {
-        //   let zip = new JSZip();
-        //   zip.file("data.json", JSON.stringify({'beforeText': beforeText, 'afterText': at}));
-        //   zip.file("commandClip.wav", blob);
-        //   zip.generateAsync({type:"blob"}).then(
-        //     function(content) {
-        //       saveAs(content, "data.zip");
-        //     }
-        //   );
-        // }
-        localforage.setItem(parseInt(index) + 'data', {'beforeText': beforeText, 'afterText': at});
-        localforage.setItem(parseInt(index) + 'commandclip', blob);
-        // send to backend
-        if (!OFFLINE) {
-          const taskId = getTaskId();
-          const beginText = props.element.start;
-          const numWords = props.element.children[0].words.length;
-          const endText = props.element.children[0].words[numWords - 1].end;
-          let prevContext = "";
-          let beginContext = beginText;
-          if (index > 0) {
-            prevContext = value[index - 1].children[0].text;
-            beginContext = value[index - 1].start;
-          }
-          let succContext = "";
-          let endContext = endText;
-          if (index < value.length - 1) {
-            succContext = value[index + 1].children[0].text;
-            const succContextNumWords = value[index + 1].children[0].words.length;
-            endContext = value[index + 1].children[0].words[succContextNumWords - 1].end;
-          }
-          const resp = setCommandClip(
-            beforeText,
-            at,
-            prevContext,
-            succContext,
-            blob,
-            beginContext,
-            beginText,
-            endText,
-            endContext,
-            taskId
-          )
-          console.log("lets look at the response");
-          console.log(resp);
+        localforage.setItem(parseInt(index) + 'data', {'afterText': at});
+      }
 
-          //  if bad request: alert();
-          if (!resp) {
-            alert("something went wrong!");
-          }
-        }
-        finishedPIndices.push(index);
-        setFinishedPIndices(finishedPIndices);
-        setActivePIndex(null);
-        // resetAudio needs to be at the end, because it triggers a rerender of the element.
-        resetAudio();
+      if (["commandclips", "commandclips2"].includes(editMode)) {
+        let blob = await fetch(audioURL).then(r => r.blob({type: "audio/wav"}));
+        localforage.setItem(parseInt(index) + 'commandclip', blob);
+      }
+
+      finishedPIndices.push(index);
+      setFinishedPIndices(finishedPIndices.concat([]));
+      setActivePIndex(null);
+      setBeforeText("");
+      // resetAudio needs to be at the end, because it triggers a rerender of the element.
+      resetAudio();
+
+      if (["commandclips", "commandclips2"].includes(editMode)) {
+        mediaRef.current.play();
       }
     }
 
-    const handleDoneCommandclips2 = async() => {
-      let blob = await fetch(audioURL).then(r => r.blob({type: "audio/wav"}));
-      localforage.setItem(parseInt(index) + 'commandclip', blob);
-      finishedPIndices.push(index);
-      setFinishedPIndices(finishedPIndices);
-      setActivePIndex(null);
-      // resetAudio needs to be at the end, because it triggers a rerender of the element.
-      resetAudio();
+
+    // needs to be adapted to all modes (wait for backend structure)
+    const handleDoneOnlinePart = async(at, blob) => {
+      const taskId = getTaskId();
+      const beginText = props.element.start;
+      const numWords = props.element.children[0].words.length;
+      const endText = props.element.children[0].words[numWords - 1].end;
+      let prevContext = "";
+      let beginContext = beginText;
+      if (index > 0) {
+        prevContext = value[index - 1].children[0].text;
+        beginContext = value[index - 1].start;
+      }
+      let succContext = "";
+      let endContext = endText;
+      if (index < value.length - 1) {
+        succContext = value[index + 1].children[0].text;
+        const succContextNumWords = value[index + 1].children[0].words.length;
+        endContext = value[index + 1].children[0].words[succContextNumWords - 1].end;
+      }
+      const resp = setCommandClip(
+        beforeText,
+        at,
+        prevContext,
+        succContext,
+        blob,
+        beginContext,
+        beginText,
+        endText,
+        endContext,
+        taskId
+      )
+      console.log("lets look at the response");
+      console.log(resp);
+
+      //  if bad request: alert();
+      if (!resp) {
+        alert("something went wrong!");
+      }
     }
 
     return (
@@ -705,9 +783,9 @@ function SlateTranscriptEditor(props) {
               : (activePIndex != null && activePIndex !== index) || done
             }
           >
-             <PlayCircle/>
+             {playing && activePIndex === index ? <Stop/> : <PlayCircle/>}
           </IconButton>
-          <IconButton onClick={editMode === 'commandclips2' ? handleDoneCommandclips2: handleDone} disabled={!((activePIndex === index) && audioURL) || isRecordingTTE}>
+          <IconButton onClick={handleDone} disabled={!(((activePIndex === index) && audioURL) || (activePIndex === null && finishedPIndices.includes(index))) || isRecordingTTE}>
             <DoneOutline/>
           </IconButton>
           </div>
@@ -736,17 +814,26 @@ function SlateTranscriptEditor(props) {
       const ccKey = parseInt(i) + 'commandclip';
       const data = await localforage.getItem(dataKey);
       const audio = await localforage.getItem(ccKey);
-      zip.file(ccKey + ".wav", audio);
+
+      if (audio !== null) {
+        zip.file(ccKey + ".wav", audio);
+      }
 
       if (data !== null) {
         texts.push({"id": i, "afterText": data["afterText"]});
       }
     }
 
-    zip.file("data.json", JSON.stringify(texts));
+    if (editMode === "commandclips") {
+      zip.file("data.json", JSON.stringify(texts));
+    }
+
+    zip.file("transcript.vtt", props.vttFile);
+
     zip.generateAsync({type:"blob"}).then(
       function(content) {
-        saveAs(content, props.title + "_done.zip");
+        const exportTitle = props.title.replace(/.to_correct$/, '');
+        saveAs(content, exportTitle + ".to_check.zip");
       }
     );
   }

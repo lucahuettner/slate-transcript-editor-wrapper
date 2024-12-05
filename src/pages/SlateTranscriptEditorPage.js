@@ -27,6 +27,7 @@ function SlateTranscriptEditorPage() {
         handleSaveEditor={props.state.uploadTranscript}
         fileName={props.state.fileName}
         mode={props.state.mode}
+        vttFile={props.state.vttFile}
       />
       </div>
     );

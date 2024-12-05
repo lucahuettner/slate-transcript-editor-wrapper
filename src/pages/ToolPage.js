@@ -13,7 +13,7 @@ import vttToDraft from "../import-adapter/vtt";
 import { getToken, isAuth, setTaskId } from "../user/User";
 import LogoutButton from "../components/LogoutButton";
 import GetVttFromId from "../api/GetVttFromId";
-import { ONE_FILE_MODE, DEFAULT_MODE } from "../constants.js";
+import { ONE_FILE_MODE, DEFAULT_MODE, AGREEMENT } from "../constants.js";
 
 
 class ToolPage extends React.Component {
@@ -31,22 +31,27 @@ class ToolPage extends React.Component {
       mode: "",
       processing: false,
       errorReadingFile: false,
+      vttFile: "",
+      agreement: false,
     };
   }
 
   // https://stackoverflow.com/questions/8885701/play-local-hard-drive-video-file-with-html5-video-tag
   handleLoadMedia = (files) => {
     const file = files[0];
+    const ext = file.name.split('.').at(-1)
 
-    if (file.type !== "application/zip") {
-      this.processMediaFile(file);
-    } else {
+    if (["application/zip", "application/zip-compressed", "application/x-zip-compressed"].includes(file.type)
+      || ext === 'zip') {
+      const zipName = file.name.split('.').slice(0, -1).join('.');
       this.setState({
         processing: true,
-        exportName: file.name.split('.').slice(0, -1).join('.'),
+        exportName: zipName,
       });
       const fileURL = URL.createObjectURL(file);
-      this.processZip(fileURL)
+      this.processZip(fileURL, zipName);
+    } else {
+      this.processMediaFile(file);
     }
   };
 
@@ -67,16 +72,33 @@ class ToolPage extends React.Component {
     }
   }
 
-  processZip = (fileURL) => {
+  processZip = (fileURL, zipName) => {
     let includesWaveFiles = false;
     let includesMediaFile = false;
     let includesTranscriptFile = false;
     let transcriptData, id, fileName, mediaURL, exportName;
 
+    if (["commandclips", "commandclips2"].includes(DEFAULT_MODE)) {
+      localforage.getItem("title").then((titleInMemory) => {
+        if (titleInMemory !== zipName) {
+          localforage.clear();
+          localforage.setItem("title", zipName);
+        }
+      });
+    } else if (DEFAULT_MODE === 'commandclipsCheck') {
+      localforage.getItem("title_check").then((titleCheckInMemory) => {
+        if (titleCheckInMemory !== zipName) {
+          localforage.clear();
+          localforage.setItem("title_check", zipName);
+        }
+      });
+    } else {
+      localforage.clear();
+    }
 
     JSZipUtils.getBinaryContent(fileURL, async (err, data) => {
-      localforage.clear();
       const zipFile = await JSZip.loadAsync(data);
+      let vttFile = "";
 
       for (const file in zipFile.files) {
         const fileSplittedOnDot = file.split(".");
@@ -94,7 +116,7 @@ class ToolPage extends React.Component {
           localforage.setItem(fileSplittedOnDot[0], audioBlob);
         } else if (fileExtension === "vtt") {
           includesTranscriptFile = true;
-          const vttFile = await zipFile.files[file].async("string");
+          vttFile = await zipFile.files[file].async("string");
           const data = vttToDraft(vttFile);
           setTaskId(data[1]);
           transcriptData = data[0];
@@ -115,6 +137,12 @@ class ToolPage extends React.Component {
         }
       }
 
+      const doubleMacronBelow = '\u035f';
+      const vttWithoutDoubleMacronBelow = vttFile.replaceAll(doubleMacronBelow, '');
+      const vttWithoutPlaceholderSpaces = vttWithoutDoubleMacronBelow.replaceAll(' '.repeat(5), ' ').
+        replaceAll(' '.repeat(4), ' ');
+
+
       if (!includesTranscriptFile || (!includesWaveFiles && !includesMediaFile)) {
         this.setState({
           processing: false,
@@ -125,8 +153,9 @@ class ToolPage extends React.Component {
           transcriptData: transcriptData,
           mediaUrl: includesMediaFile ? mediaURL : "no media",
           id: id,
-          mode: ["commandclips", "commandclips2"].includes(DEFAULT_MODE) ? "commandclipsCheck" : DEFAULT_MODE,
+          mode: DEFAULT_MODE,
           processing: false,
+          vttFile: vttWithoutPlaceholderSpaces,
         });
       } else {
         this.setState({
@@ -135,6 +164,7 @@ class ToolPage extends React.Component {
           id: id,
           mode: DEFAULT_MODE,
           processing: false,
+          vttFile: vttWithoutPlaceholderSpaces,
         });
       }
 
@@ -281,6 +311,34 @@ class ToolPage extends React.Component {
                   )}
                 </Button>
               </p>
+
+              <div style={{ display: "flex", flexDirection: "row" }}>
+                <input
+                  name="isGoing"
+                  type="checkbox"
+                  onChange={(e) => {
+                    this.setState({agreement: e.target.checked});
+                  }}
+                  style={{ alignSelf: "center" }}
+                />
+                <p href={AGREEMENT} style={{ fontSize: 10, alignSelf: "center" }}>
+                  {" "}
+                  I agree to the terms and conditions of this{" "}
+                </p>
+                <div style={{ width: 5 }}> </div>
+                <a
+                  href={AGREEMENT}
+                  style={{
+                    fontSize: 10,
+                    alignSelf: "center",
+                    display: "table-cell",
+                  }}
+                  target="_blank"
+                >
+                  {" "}
+                  agreement
+                </a>
+              </div>
             </div>
 
             <div style={{ height: 15 }}></div>
@@ -326,7 +384,8 @@ class ToolPage extends React.Component {
               </div>
               <p style={{fontSize:25}}>OR</p>*/}
               {this.state.errorReadingFile && "Problems reading file, please load another file."}
-              {this.state.processing && "Loading... This can take some time. Please be patient."}
+              {this.state.processing && this.state.agreement && "Loading... This can take some time. Please be patient."}
+              {this.state.processing && !this.state.agreement && "Loading... This can take some time. Please be patient. Do not forget to accept the agreement."}
               {!ONE_FILE_MODE &&
                 <Button
                   variant="contained"
@@ -349,7 +408,7 @@ class ToolPage extends React.Component {
               }
             </div>
 
-            {this.state.transcriptData && this.state.mediaUrl && (
+            {this.state.transcriptData && this.state.mediaUrl && (!ONE_FILE_MODE || this.state.agreement) && (
               <Redirect
                 to={{
                   pathname: "editor",
@@ -361,6 +420,7 @@ class ToolPage extends React.Component {
                     exportName: this.state.exportName,
                     uploadTranscript: this.state.uploadTranscript,
                     mode: this.state.mode,
+                    vttFile: this.state.vttFile,
                   },
                 }}
               ></Redirect>
